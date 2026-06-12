@@ -10,30 +10,27 @@ import SwiftUI
 
 /// Initialises a declarative SwiftUI view that renders the live hardware camera feed.
 /// 
-/// This initialiser utilises action injection to elegantly separate the hardware matrix maths
+/// This initialiser utilises action injection to elegantly separate the hardware matrix math
 /// from the UI layer. When the user taps the camera preview, the underlying UIKit coordinator
 /// calculates both the screen position and the normalised sensor position, routing them directly
 /// to their respective closures.
-/// 
-/// - Parameters:
-///   - session: The active `AVCaptureSession` coordinating the optical hardware.
-///   - executeHardwareFocus: An optional closure providing the normalised camera coordinate
-///     (ranging strictly from 0.0 to 1.0). Use this to command the physical lens to focus.
-///   - updateUIFocusBox: An optional closure providing the absolute screen coordinate
-///     (in view points). Use this to safely render and animate your SwiftUI focus indicators.
-///     
-public struct DeviceCameraPreview: UIViewRepresentable {
+public struct CameraPreview: UIViewRepresentable {
     
     public let session: AVCaptureSession
     public var executeHardwareFocus: ((CGPoint) -> Void)?
     public var updateUIFocusBox: ((CGPoint) -> Void)?
     
+    /// Creates a hardware-accelerated preview rendering the active camera feed.
+    /// - Parameters:
+    ///   - service: The active `CameraService` coordinating the optical hardware.
+    ///   - executeHardwareFocus: An optional closure providing the normalised camera coordinate (0.0 to 1.0).
+    ///   - updateUIFocusBox: An optional closure providing the absolute screen coordinate (in view points).
     public init(
-        session: AVCaptureSession,
+        service: CameraService,
         executeHardwareFocus: ((CGPoint) -> Void)? = nil,
         updateUIFocusBox: ((CGPoint) -> Void)? = nil
     ) {
-        self.session = session
+        self.session = service.session
         self.executeHardwareFocus = executeHardwareFocus
         self.updateUIFocusBox = updateUIFocusBox
     }
@@ -43,10 +40,8 @@ public struct DeviceCameraPreview: UIViewRepresentable {
         view.videoPreviewLayer.session = session
         view.videoPreviewLayer.videoGravity = .resizeAspectFill
         
-        // Attach a native UIKit tap gesture so we can access the layer's maths functions
         let tapGesture = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
         view.addGestureRecognizer(tapGesture)
-        
         return view
     }
     
@@ -62,19 +57,16 @@ public struct DeviceCameraPreview: UIViewRepresentable {
     
     @MainActor
     public class Coordinator: NSObject {
-        var parent: DeviceCameraPreview
+        var parent: CameraPreview
         
-        init(_ parent: DeviceCameraPreview) {
+        init(_ parent: CameraPreview) {
             self.parent = parent
         }
         
         @objc func handleTap(_ sender: UITapGestureRecognizer) {
             guard let view = sender.view as? PreviewView else { return }
-            
             let viewPoint = sender.location(in: view)
             let cameraPoint = view.videoPreviewLayer.captureDevicePointConverted(fromLayerPoint: viewPoint)
-            
-            // The preview routes the data exactly where it needs to go
             parent.executeHardwareFocus?(cameraPoint)
             parent.updateUIFocusBox?(viewPoint)
         }

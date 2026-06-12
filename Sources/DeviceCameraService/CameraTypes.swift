@@ -8,6 +8,7 @@
 import AVFoundation
 import Foundation
 
+/// Errors that can occur during camera configuration and execution.
 public enum CameraError: LocalizedError {
     case permissionDenied
     case deviceUnavailable
@@ -24,8 +25,10 @@ public enum CameraError: LocalizedError {
     }
 }
 
+/// The flash mode for photo capture.
 public enum CameraFlashMode {
     case off, on, auto
+    
     public var avFlashMode: AVCaptureDevice.FlashMode {
         switch self {
         case .off: return .off
@@ -37,6 +40,8 @@ public enum CameraFlashMode {
 
 /// Represents a specific optical zoom milestone on a Virtual Device.
 public struct VirtualLens: Equatable {
-    public let name: String       // e.g., "0.5x", "1x", "3x"
-    public let zoomFactor: CGFloat // The actual hardware multiplier mapping to this lens
+    /// The human-readable name of the lens (e.g., "0.5x", "1x", "3x").
+    public let name: String
+    /// The actual hardware multiplier mapping to this physical lens.
+    public let zoomFactor: CGFloat
 }

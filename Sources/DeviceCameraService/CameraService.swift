@@ -5,22 +5,35 @@ import AVFoundation
 import SwiftUI
 import UIKit
 
+/// A hardware-accelerated service responsible for managing physical iOS camera devices.
+/// Handles virtual lens abstraction, automatic focus coordination, and thread-safe session execution.
 @MainActor
 @Observable
-public class DeviceCameraService: NSObject {
+public class CameraService: NSObject {
     
+    /// The underlying AVFoundation pipeline coordinating the hardware.
     public let session = AVCaptureSession()
+    
+    /// The most recently captured full-resolution image.
     public var capturedImage: UIImage? = nil
     
-    // Virtual Lens Tracking
+    /// A dynamically generated array of optical lenses available on the current physical device.
     public private(set) var availableLenses: [VirtualLens] = []
+    
+    /// The currently active optical lens.
     public var activeLens: VirtualLens?
     
+    /// The flash mode applied to the next photo capture.
     public var flashMode: CameraFlashMode = .auto
+    
+    /// The current exact hardware zoom multiplier.
     public var currentZoomFactor: CGFloat = 1.0
+    
+    /// The hardware zoom multiplier that corresponds to the standard "1x" wide lens.
     public private(set) var baseZoomFactor: CGFloat = 1.0
+    
     private var gestureZoomFactor: CGFloat = 1.0
-    private var absoluteMaxZoom: CGFloat = 10.0 // Clamped max for digital zoom
+    private var absoluteMaxZoom: CGFloat = 10.0
     
     private var videoInput: AVCaptureDeviceInput?
     private let photoOutput = AVCapturePhotoOutput()
@@ -28,7 +41,9 @@ public class DeviceCameraService: NSObject {
     
     public override init() { super.init() }
     
-    public func requestPermissionsAndSetup() async throws {
+    /// Requests user permissions and configures the physical hardware session.
+    /// - Throws: `CameraError` if permissions are denied or hardware cannot be locked.
+    public func startCamera() async throws {
         let status = AVCaptureDevice.authorizationStatus(for: .video)
         if status == .notDetermined {
             let granted = await AVCaptureDevice.requestAccess(for: .video)
@@ -40,6 +55,22 @@ public class DeviceCameraService: NSObject {
         try configureSession()
     }
     
+    /// Safely powers down the camera hardware and releases background threads.
+    /// This should be called when the camera view disappears to preserve battery.
+    public func stopCamera() {
+        final class SessionContainer: @unchecked Sendable {
+            let session: AVCaptureSession
+            init(_ session: AVCaptureSession) { self.session = session }
+        }
+        
+        let container = SessionContainer(self.session)
+        Task.detached {
+            if container.session.isRunning {
+                container.session.stopRunning()
+            }
+        }
+    }
+    
     private func configureSession() throws {
         session.beginConfiguration()
         defer { session.commitConfiguration() }
@@ -48,7 +79,6 @@ public class DeviceCameraService: NSObject {
             session.removeInput(currentInput)
         }
         
-        // 1. Find the best Virtual Device available for the requested position
         let device = try findBestCamera(for: currentPosition)
         
         guard let input = try? AVCaptureDeviceInput(device: device) else {
@@ -66,7 +96,6 @@ public class DeviceCameraService: NSObject {
             session.addOutput(photoOutput)
         }
         
-        // 2. Map the hardware's switchover milestones into UI buttons
         mapVirtualLenses(for: device)
         
         final class SessionContainer: @unchecked Sendable {
@@ -80,7 +109,6 @@ public class DeviceCameraService: NSObject {
         }
     }
     
-    /// Finds the most advanced camera system available. Prioritises Virtual Devices.
     private func findBestCamera(for position: AVCaptureDevice.Position) throws -> AVCaptureDevice {
         if position == .front {
             guard let front = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front) else {
@@ -89,7 +117,6 @@ public class DeviceCameraService: NSObject {
             return front
         }
         
-        // Look for Triple, then DualWide, then Dual, and fallback to Wide
         let deviceTypes: [AVCaptureDevice.DeviceType] = [
             .builtInTripleCamera, .builtInDualWideCamera, .builtInDualCamera, .builtInWideAngleCamera
         ]
@@ -101,26 +128,20 @@ public class DeviceCameraService: NSObject {
         return bestDevice
     }
     
-    /// Translates the physical hardware milestones into `VirtualLens` buttons for the UI.
     private func mapVirtualLenses(for device: AVCaptureDevice) {
         var lenses: [VirtualLens] = []
         
         if device.deviceType == .builtInTripleCamera || device.deviceType == .builtInDualWideCamera {
-            // Base zoom (1.0) corresponds to the Ultra Wide lens (0.5x equivalent)
             lenses.append(VirtualLens(name: "0.5x", zoomFactor: 1.0))
-            
             let switchovers = device.virtualDeviceSwitchOverVideoZoomFactors
             if switchovers.count > 0 {
-                // First switchover is the Wide lens (1x equivalent)
                 lenses.append(VirtualLens(name: "1x", zoomFactor: CGFloat(switchovers[0].floatValue)))
             }
             if switchovers.count > 1 {
-                // Second switchover is the Telephoto lens (e.g., 3x or 5x equivalent)
                 let teleRatio = Int(round(switchovers[1].floatValue / switchovers[0].floatValue))
                 lenses.append(VirtualLens(name: "\(teleRatio)x", zoomFactor: CGFloat(switchovers[1].floatValue)))
             }
         } else if device.deviceType == .builtInDualCamera {
-            // Base zoom (1.0) corresponds to the Wide lens (1x equivalent)
             lenses.append(VirtualLens(name: "1x", zoomFactor: 1.0))
             let switchovers = device.virtualDeviceSwitchOverVideoZoomFactors
             if switchovers.count > 0 {
@@ -128,13 +149,10 @@ public class DeviceCameraService: NSObject {
                 lenses.append(VirtualLens(name: "\(teleRatio)x", zoomFactor: CGFloat(switchovers[0].floatValue)))
             }
         } else {
-            // Single lens fallback
             lenses.append(VirtualLens(name: "1x", zoomFactor: 1.0))
         }
         
         self.availableLenses = lenses
-        
-        // Find the "1x" lens and set it as the mathematical baseline
         let default1x = lenses.first(where: { $0.name == "1x" }) ?? lenses.first
         self.baseZoomFactor = default1x?.zoomFactor ?? 1.0
         
@@ -142,15 +160,13 @@ public class DeviceCameraService: NSObject {
         self.currentZoomFactor = self.baseZoomFactor
         self.gestureZoomFactor = self.baseZoomFactor
         
-        // Capping digital zoom to 5x user zoom (Matching Apple's OEM Camera limit)
         let oemMaxUserZoom: CGFloat = 5.0
         self.absoluteMaxZoom = min(oemMaxUserZoom * self.baseZoomFactor, device.activeFormat.videoMaxZoomFactor)
         
         try? setHardwareZoom(to: self.currentZoomFactor)
     }
     
-    // MARK: - Actions
-    
+    /// Triggers the active hardware to capture a high-resolution photo.
     public func takePhoto() {
         let settings = AVCapturePhotoSettings()
         if photoOutput.supportedFlashModes.contains(flashMode.avFlashMode) {
@@ -159,6 +175,7 @@ public class DeviceCameraService: NSObject {
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
     
+    /// Cycles the current flash mode (Auto -> On -> Off).
     public func toggleFlash() {
         switch flashMode {
         case .auto: flashMode = .on
@@ -167,66 +184,55 @@ public class DeviceCameraService: NSObject {
         }
     }
     
+    /// Toggles the hardware session between the front and rear camera modules.
     public func switchCamera() throws {
         currentPosition = currentPosition == .back ? .front : .back
         try configureSession()
     }
     
-    /// Seamlessly loops through the available optical lenses.
+    /// Seamlessly jumps to the next available physical optical lens.
     public func cycleLens() throws {
         guard availableLenses.count > 1, let active = activeLens, let currentIndex = availableLenses.firstIndex(of: active) else { return }
-        
         let nextIndex = (currentIndex + 1) % availableLenses.count
         let nextLens = availableLenses[nextIndex]
-        
         self.gestureZoomFactor = nextLens.zoomFactor
-        
-        // Instead of tearing down the session, we just change the zoom factor!
         try setHardwareZoom(to: nextLens.zoomFactor)
     }
     
-    /// Adjusts the global zoom factor and automatically switches lenses behind the scenes.
+    /// Applies a continuous digital zoom delta, factoring in magnetic snap physics for optical thresholds.
+    /// - Parameter factor: The pinch magnification delta to apply.
     public func zoom(with factor: CGFloat) throws {
-        // 1. Apply the maths to the phantom tracker, NOT the hardware state
         gestureZoomFactor = max(1.0, min(gestureZoomFactor * factor, absoluteMaxZoom))
-        
         var hardwareZoomToApply = gestureZoomFactor
         
-        // 2. See if the phantom tracker is hovering near a physical lens
         for lens in availableLenses {
-            let lowerBound = lens.zoomFactor * 0.97 // 3% snap window
+            let lowerBound = lens.zoomFactor * 0.97
             let upperBound = lens.zoomFactor * 1.03
-            
             if gestureZoomFactor >= lowerBound && gestureZoomFactor <= upperBound {
                 hardwareZoomToApply = lens.zoomFactor
                 break
             }
         }
-        
-        // 3. Send the calculated value to the camera
         try setHardwareZoom(to: hardwareZoomToApply)
     }
     
-    /// Helper to apply zoom and update the UI string based on the current threshold.
     private func setHardwareZoom(to factor: CGFloat) throws {
         guard let device = videoInput?.device else { return }
-        
         do {
             try device.lockForConfiguration()
             device.videoZoomFactor = factor
             currentZoomFactor = factor
-            
-            // Automatically highlight the correct UI button (e.g., changes from 1x to 3x mid-pinch)
             if let matchedLens = availableLenses.last(where: { factor >= $0.zoomFactor }) {
                 activeLens = matchedLens
             }
-            
             device.unlockForConfiguration()
         } catch {
             throw CameraError.configurationLockFailed(error.localizedDescription)
         }
     }
     
+    /// Directs the physical optical lens to focus and expose on a specific sensor coordinate.
+    /// - Parameter point: A normalised coordinate (0.0 to 1.0) relative to the sensor geometry.
     public func focus(at point: CGPoint) throws {
         guard let device = videoInput?.device else { return }
         do {
@@ -247,7 +253,7 @@ public class DeviceCameraService: NSObject {
     }
 }
 
-extension DeviceCameraService: AVCapturePhotoCaptureDelegate {
+extension CameraService: AVCapturePhotoCaptureDelegate {
     nonisolated public func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
         if let data = photo.fileDataRepresentation(), let image = UIImage(data: data) {
             Task { @MainActor [weak self] in self?.capturedImage = image }
